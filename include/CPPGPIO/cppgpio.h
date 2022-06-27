@@ -1,6 +1,9 @@
 #include "driver/gpio.h"
+#include "esp_event.h"
 
 namespace CPPGPIO{
+
+    ESP_EVENT_DECLARE_BASE(INPUT_EVENTS);
     
     class GpioBase
         {
@@ -14,6 +17,8 @@ namespace CPPGPIO{
         {   
             // _init function is a private function of type esp_err_t
             private:
+                bool _event_handler_set;
+                static bool _interrupt_service_installed;
                 esp_err_t _init(const gpio_num_t pin, const bool activeLow);
 
             public:
@@ -24,6 +29,16 @@ namespace CPPGPIO{
                 esp_err_t init(const gpio_num_t pin, const bool activeLow);
                 esp_err_t init(const gpio_num_t pin);
                 int read(void);
+                esp_err_t enablePullup(void);
+                esp_err_t disablePullup(void);
+                esp_err_t enablePulldown(void);
+                esp_err_t disablePulldown(void);
+                esp_err_t enablePullupPulldown(void);
+                esp_err_t disablePullupPulldown(void);
+                esp_err_t enableInterrupt(gpio_int_type_t int_type);
+                esp_err_t setEventHandler(esp_event_handler_t Gpio_e_h);
+                static void IRAM_ATTR gpio_isr_callback(void* arg);
+        
         }; // GpioInput Class
 
     class GpioOutput : public GpioBase
