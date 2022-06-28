@@ -8,7 +8,6 @@ namespace CPPGPIO{
     class GpioBase
         {
             protected:
-                gpio_num_t _pin;
                 bool _active_low;
         }; // GpioBase Class
 
@@ -17,9 +16,27 @@ namespace CPPGPIO{
         {   
             // _init function is a private function of type esp_err_t
             private:
-                bool _event_handler_set;
+                //bool _event_handler_set;
+                
                 static bool _interrupt_service_installed;
+                
                 esp_err_t _init(const gpio_num_t pin, const bool activeLow);
+
+                //bool _event_handler_set = false;
+                esp_event_handler_t _event_handle = nullptr;
+                static portMUX_TYPE _eventChangeMutex;
+                
+                struct interrupt_args
+                {   
+                    bool _event_handler_set = false;
+                    bool _custom_event_handler_set = false;
+                    bool _queue_enabled = false;
+                    gpio_num_t _pin;
+                    esp_event_loop_handle_t _custom_event_loop_handle {nullptr};
+                    xQueueHandle _queue_handle {nullptr};
+                } _interrupt_args;
+
+                esp_err_t _clearEventHandlers();
 
             public:
             // Constructors below
@@ -38,12 +55,15 @@ namespace CPPGPIO{
                 esp_err_t enableInterrupt(gpio_int_type_t int_type);
                 esp_err_t setEventHandler(esp_event_handler_t Gpio_e_h);
                 static void IRAM_ATTR gpio_isr_callback(void* arg);
+                esp_err_t setEventHandler(esp_event_loop_handle_t Gpio_e_l, esp_event_handler_t Gpio_e_h);
+                void setQueueHandle(xQueueHandle Gpio_e_q);
         
         }; // GpioInput Class
 
     class GpioOutput : public GpioBase
         {
         private:
+            gpio_num_t _pin;
             int _level = 0;
             esp_err_t _init(const gpio_num_t pin, const bool activeLow);
 

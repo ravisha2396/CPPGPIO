@@ -6,13 +6,30 @@ namespace CPPGPIO
 
     ESP_EVENT_DEFINE_BASE(INPUT_EVENTS);
 
+    portMUX_TYPE GpioInput::_eventChangeMutex = portMUX_INITIALIZER_UNLOCKED;
+
     void IRAM_ATTR GpioInput::gpio_isr_callback(void *args)
-    {
-        int32_t pin = reinterpret_cast<int32_t>(args);
-       
-        esp_event_isr_post(INPUT_EVENTS, pin, nullptr, 0, nullptr);
-        
-    }
+        {
+            int32_t pin = (reinterpret_cast<struct interrupt_args *>(args))->_pin;
+            bool custom_event_handler_set = (reinterpret_cast<struct interrupt_args *>(args))->_custom_event_handler_set;
+            bool event_handler_set = (reinterpret_cast<struct interrupt_args *>(args))->_event_handler_set;
+            bool queue_enabled = (reinterpret_cast<struct interrupt_args *>(args))->_queue_enabled;
+            esp_event_loop_handle_t custom_event_loop_handle = (reinterpret_cast<struct interrupt_args *>(args))->_custom_event_loop_handle;
+            xQueueHandle queue_handle = (reinterpret_cast<struct interrupt_args *>(args))->_queue_handle;
+
+            if (queue_enabled)
+            {
+                xQueueSendFromISR(queue_handle, &pin, NULL);
+            }
+            else if (custom_event_handler_set)
+            {
+                esp_event_isr_post_to(custom_event_loop_handle, INPUT_EVENTS, pin, nullptr, 0, nullptr);
+            }
+            else if (event_handler_set)
+            {
+                esp_event_isr_post(INPUT_EVENTS, pin, nullptr, 0, nullptr);
+            }
+        }
 
     esp_err_t GpioInput::_init( const gpio_num_t pin, const bool activeLow )
         {   
@@ -20,7 +37,7 @@ namespace CPPGPIO
             esp_err_t status{ESP_OK};
 
             _active_low = activeLow;
-            _pin = pin;
+            _interrupt_args._pin = pin;
 
             gpio_config_t cfg;
             cfg.pin_bit_mask = 1UL << pin;
@@ -55,32 +72,32 @@ namespace CPPGPIO
 
         esp_err_t GpioInput::enablePullup(void)
     {
-        return gpio_set_pull_mode(_pin, GPIO_PULLUP_ONLY);
+        return gpio_set_pull_mode(_interrupt_args._pin, GPIO_PULLUP_ONLY);
     }
 
     esp_err_t GpioInput::disablePullup(void)
     {
-        return gpio_set_pull_mode(_pin, GPIO_FLOATING);
+        return gpio_set_pull_mode(_interrupt_args._pin, GPIO_FLOATING);
     }
 
     esp_err_t GpioInput::enablePulldown(void)
     {
-        return gpio_set_pull_mode(_pin, GPIO_PULLDOWN_ONLY);
+        return gpio_set_pull_mode(_interrupt_args._pin, GPIO_PULLDOWN_ONLY);
     }
 
     esp_err_t GpioInput::disablePulldown(void)
     {
-        return gpio_set_pull_mode(_pin, GPIO_FLOATING);
+        return gpio_set_pull_mode(_interrupt_args._pin, GPIO_FLOATING);
     }
 
     esp_err_t GpioInput::enablePullupPulldown(void)
     {
-        return gpio_set_pull_mode(_pin, GPIO_PULLUP_PULLDOWN);
+        return gpio_set_pull_mode(_interrupt_args._pin, GPIO_PULLUP_PULLDOWN);
     }
 
     esp_err_t GpioInput::disablePullupPulldown(void)
     {
-        return gpio_set_pull_mode(_pin, GPIO_FLOATING);
+        return gpio_set_pull_mode(_interrupt_args._pin, GPIO_FLOATING);
     }
 
     esp_err_t GpioInput::enableInterrupt(gpio_int_type_t int_type)
@@ -120,12 +137,12 @@ namespace CPPGPIO
 
         if (ESP_OK == status)
         {
-            status = gpio_set_intr_type(_pin, int_type);
+            status = gpio_set_intr_type(_interrupt_args._pin, int_type);
         }
 
         if (ESP_OK == status)
         {
-            status = gpio_isr_handler_add(_pin, gpio_isr_callback, (void*) _pin);
+            status = gpio_isr_handler_add(_interrupt_args._pin, gpio_isr_callback, (void*) _interrupt_args._pin);
         }
         return status;
     }
@@ -134,15 +151,74 @@ namespace CPPGPIO
     {
         esp_err_t status{ESP_OK};
 
-        status = esp_event_handler_instance_register(INPUT_EVENTS, _pin, Gpio_e_h, 0, nullptr);
+        taskENTER_CRITICAL(&_eventChangeMutex);
+
+        status = _clearEventHandlers();
+
+        status = esp_event_handler_instance_register(INPUT_EVENTS, _interrupt_args._pin, Gpio_e_h, 0, nullptr);
 
         if (ESP_OK == status)
         {
-            _event_handler_set = true;
+            _interrupt_args._event_handler_set = true;
         }
+
+        taskEXIT_CRITICAL(&_eventChangeMutex);
 
         return status;
     }
+
+    esp_err_t GpioInput::setEventHandler(esp_event_loop_handle_t Gpio_e_l, esp_event_handler_t Gpio_e_h)
+    {
+        esp_err_t status{ESP_OK};
+
+        taskENTER_CRITICAL(&_eventChangeMutex);
+
+        status = _clearEventHandlers();
+
+        status |= esp_event_handler_instance_register_with(Gpio_e_l, INPUT_EVENTS, _interrupt_args._pin, Gpio_e_h, 0, nullptr);
+
+        if (ESP_OK == status)
+        {
+            _event_handle = Gpio_e_h;
+            _interrupt_args._custom_event_loop_handle = Gpio_e_l;
+            _interrupt_args._custom_event_handler_set = true;
+        }
+
+        taskEXIT_CRITICAL(&_eventChangeMutex);
+
+        return status;
+    }
+
+    void GpioInput::setQueueHandle(xQueueHandle Gpio_e_q)
+    {
+        taskENTER_CRITICAL(&_eventChangeMutex);
+        _clearEventHandlers();
+        _interrupt_args._queue_handle = Gpio_e_q;
+        _interrupt_args._queue_enabled = true;
+        taskEXIT_CRITICAL(&_eventChangeMutex);
+    }
+
+    esp_err_t GpioInput::_clearEventHandlers()
+    {
+        esp_err_t status {ESP_OK};
+
+        if(_interrupt_args._custom_event_handler_set)
+        {
+            esp_event_handler_unregister_with(_interrupt_args._custom_event_loop_handle, INPUT_EVENTS, _interrupt_args._pin, _event_handle);
+            _interrupt_args._custom_event_handler_set = false;
+        }
+        else if (_interrupt_args._event_handler_set)
+        {
+            esp_event_handler_instance_unregister(INPUT_EVENTS, _interrupt_args._pin, nullptr);
+            _interrupt_args._event_handler_set = false;
+        }
+
+        _interrupt_args._queue_handle = nullptr;
+        _interrupt_args._queue_enabled = false;
+
+        return status;
+    }
+
 
     /*
 
@@ -153,7 +229,7 @@ namespace CPPGPIO
     */
     
     int GpioInput::read(void){
-        return _active_low ? !gpio_get_level(_pin) : gpio_get_level(_pin);
+        return _active_low ? !gpio_get_level(_interrupt_args._pin) : gpio_get_level(_interrupt_args._pin);
     }
 
 } // Namespace CPPGPIO
